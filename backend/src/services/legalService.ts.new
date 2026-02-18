@@ -1,0 +1,122 @@
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { LEGAL_SYSTEM_PROMPT, CASE_TYPE_PROMPTS } from "../utils/prompts.js";
+import fs from "fs";
+
+let genAI: GoogleGenerativeAI | null = null;
+
+function getGenAI(): GoogleGenerativeAI {
+  if (!genAI) {
+    const apiKey = process.env.GEMINI_API_KEY || "";
+    if (!apiKey) throw new Error("GEMINI_API_KEY environment variable is not set");
+    console.log(`✓ Initializing Gemini API with key (first 10 chars: ${apiKey.substring(0,10)}...)`);
+    genAI = new GoogleGenerativeAI(apiKey);
+  }
+  return genAI;
+}
+
+interface LegalQueryInput {
+  caseType: string;
+  location: string;
+  description: string;
+  language: string;
+}
+
+interface LegalGuidance {
+  steps: string[];
+  requiredDocuments: string[];
+  estimatedFees: string;
+  timeline: string;
+  disclaimers: string[];
+  clarifyingQuestions?: string[];
+}
+
+export async function generateLegalGuidance(input: LegalQueryInput): Promise<LegalGuidance> {
+  try {
+    const candidateModel = await pickAvailableModel(["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]);
+    const model = getGenAI().getGenerativeModel({ model: candidateModel });
+
+    const caseSpecificPrompt = CASE_TYPE_PROMPTS[input.caseType as keyof typeof CASE_TYPE_PROMPTS] || CASE_TYPE_PROMPTS["Consumer Complaint"];
+    const languageInstruction = input.language === "en" ? "Respond in English." : `Respond in the language code: ${input.language}. Provide translations for legal terms.`;
+
+    const userPrompt = `${LEGAL_SYSTEM_PROMPT}\n\n${caseSpecificPrompt}\n\n${languageInstruction}\n\nUser's Location: ${input.location}\nIssue Description: ${input.description}\n\nAnalyze this legal issue and provide guidance in the specified format. If any critical information is missing, include clarifying questions.\n\nIMPORTANT: Return ONLY valid JSON, no other text.`;
+
+    const result = await model.generateContent(userPrompt);
+    const responseText = await result.response.text();
+    const cleanedText = responseText.replace(/^[^{]*/, "").replace(/[^}]*$/, "");
+    const jsonMatch = cleanedText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return parseTextResponse(responseText, input.caseType);
+
+    return JSON.parse(jsonMatch[0]) as LegalGuidance;
+  } catch (err) {
+    console.error('Error generating legal guidance:', err);
+    return generateDemoGuidance(input.caseType, input.location);
+  }
+}
+
+function generateDemoGuidance(caseType: string, location: string): LegalGuidance {
+  const demoResponses: Record<string, LegalGuidance> = {
+    FIR: {
+      steps: [
+        "Go to the nearest police station that has jurisdiction over the place where the crime occurred",
+        "Meet with the police officer at the front desk and explain the situation clearly",
+        "Provide details including: date, time, location, names of accused, and witnesses if any",
+        "The police will record your statement and create an FIR (First Information Report)",
+        "You can request a copy of the FIR for your records",
+        "The police will begin investigation within 24 hours",
+        "Keep track of the case number provided by the police",
+        "Attend follow-up sessions if required for questioning",
+        "Consider hiring a lawyer to guide you through the process"
+      ],
+      requiredDocuments: [
+        "Valid Photo ID (Aadhaar, PAN, Passport, Voter ID)",
+        "Address Proof (Recent utility bill, rent agreement)",
+        "FIR Acknowledgment receipt (provided by police)",
+        "Photos/Videos of evidence if any",
+        "Contact information of potential witnesses"
+      ],
+      estimatedFees: "FREE - FIR filing is free of cost",
+      timeline: "FIR registered within 24 hours of filing; Investigation typically takes 2-6 months",
+      disclaimers: ["⚠️ This is legal information, not legal advice", "Please consult a licensed lawyer for specific cases"],
+      clarifyingQuestions: ["What type of crime occurred?", "When exactly did the incident happen?", "Do you have any witness contact information?", "Are there any photos or videos of the crime scene?"]
+    },
+    "Consumer Complaint": {
+      steps: [
+        "Document all evidence: receipts, emails, messages, photos",
+        "Send a notice to the seller/service provider demanding redressal (via registered mail)",
+        "Wait for 30 days for their response",
+        "If no resolution, file complaint at District Consumer Redressal Commission",
+        "Prepare your complaint statement with all evidence",
+        "Pay the filing fee based on claim value",
+        "Submit the complaint along with required documents",
+        "Attend hearing on scheduled dates",
+        "Receive order from the commission within 3-5 months typically"
+      ],
+      requiredDocuments: ["Purchase invoice/receipt with date", "Warranty card or certificate if applicable", "Photographs of defective product", "Repair/Service bills if any", "Consumer complain letter sent to seller", "Proof of payment (receipt, cheque copy)", "Communication records (emails, SMS, chat screenshots)"],
+      estimatedFees: "Filing fee: 100-500 INR depending on claim amount",
+      timeline: "Complaint processing typically takes 3-6 months; possible compensation within 2 weeks to 3 months after filing",
+      disclaimers: ["⚠️ This is legal information, not legal advice", "Consult a lawyer for complex consumer cases"],
+      clarifyingQuestions: ["What is the product/service complaint about?", "What is the value of goods/services involved?", "Have you already complained to the seller?", "What compensation are you seeking?"]
+    }
+  };
+
+  const guidance = demoResponses[caseType] || demoResponses["Consumer Complaint"];
+  return {
+    ...guidance,
+    disclaimers: [
+      "⚠️ DEMO MODE: This is sample legal information generated for demonstration purposes",
+      "⚠️ This is legal information, not legal advice. Please consult a licensed lawyer for your specific case.",
+      `Guidance for: ${caseType} in ${location}`,
+      "Please verify all information with local authorities and a qualified lawyer"
+    ]
+  };
+}
+
+function parseTextResponse(text: string, caseType: string): LegalGuidance {
+  return {
+    steps: ["Consult with a local lawyer familiar with " + caseType + " cases in your jurisdiction", "Gather all relevant documents and evidence", "File the appropriate petition with the relevant authority", "Attend hearings and follow court instructions"],
+    requiredDocuments: ["Photo ID and address proof", "Relevant documents related to the case", "Evidence or supporting materials"],
+    estimatedFees: "Contact local legal aid or lawyer for exact fees",
+    timeline: "Varies based on case complexity and court workload",
+    disclaimers: ["⚠️ This is legal information, not legal advice.", "Please consult a licensed lawyer for your specific case.", text]
+  };
+}
